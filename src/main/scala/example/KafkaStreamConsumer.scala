@@ -8,6 +8,7 @@ import fs2._
 import fs2.kafka._
 import io.chrisdavenport.log4cats.Logger
 import io.chrisdavenport.log4cats.slf4j.Slf4jLogger
+import org.apache.kafka.common.KafkaException
 import org.apache.kafka.common.serialization.StringDeserializer
 
 import scala.concurrent.ExecutionContext
@@ -50,9 +51,18 @@ object KafkaStreamConsumer extends StrictLogging {
           .map(process[F])
       }
       .parJoinUnbounded
-      .through(commitBatchWithin(3, 3.seconds))
-      .evalTap(_ => Sync[F].raiseError(new RuntimeException))
-      .attempts(Stream.emits(Seq(1.second, 1.second)))
+      .groupWithin(10, 60.seconds)
+      .evalMap { chunks =>
+        CommittableOffsetBatch.fromFoldable(chunks.map { co =>
+          CommittableOffset[F](
+            topicPartition = co.topicPartition,
+            offsetAndMetadata = co.offsetAndMetadata,
+            consumerGroupId = config.groupId.some,
+            commit = _ => Sync[F].raiseError(new KafkaException),
+          )
+        }).commit
+      }
+      .attempts(Stream.emit(2.seconds).repeat)
       .evalMap {
         case Left(error) => log.error(error)("stream failed")
         case Right(_)    => Sync[F].unit
