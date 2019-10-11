@@ -51,17 +51,16 @@ object KafkaStreamConsumer extends StrictLogging {
           .map(process[F])
       }
       .parJoinUnbounded
-      .groupWithin(10, 60.seconds)
-      .evalMap { chunks =>
-        CommittableOffsetBatch.fromFoldable(chunks.map { co =>
+      .map { co =>
           CommittableOffset[F](
             topicPartition = co.topicPartition,
             offsetAndMetadata = co.offsetAndMetadata,
             consumerGroupId = config.groupId.some,
             commit = _ => Sync[F].raiseError(new KafkaException),
           )
-        }).commit
       }
+      .through(commitBatchWithin(10, 60.seconds))
+      .scope
       .attempts(Stream.emit(2.seconds).repeat)
       .evalMap {
         case Left(error) => log.error(error)("stream failed")
